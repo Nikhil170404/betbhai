@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cricket Odds API for BetBhai.io - Fixed for Render with 1-second updates
+Cricket Odds API for BetBhai.io - Fixed for Render with fetch-quit-wait-repeat cycle
 """
 
 import os
@@ -44,7 +44,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 app = FastAPI(
     title="Cricket Odds API",
     description="API for real-time cricket odds from betbhai.io",
-    version="2.0.1",
+    version="2.0.2",
 )
 
 # Add CORS middleware
@@ -104,7 +104,7 @@ scraper_state = {
 }
 
 class CricketOddsScraper:
-    """Scraper for extracting cricket odds from betbhai.io - fixed for Render"""
+    """Scraper for extracting cricket odds from betbhai.io - with fetch-quit-wait-repeat cycle"""
     
     def __init__(self, url="https://www.betbhai.io/"):
         self.url = url
@@ -430,103 +430,113 @@ class CricketOddsScraper:
             return False
     
     def run(self, interval=1):
-        """Run the scraper every 'interval' seconds with improved reliability"""
+        """Run the scraper with a fetch-quit-wait-repeat approach for better stability"""
         with scraper_state["lock"]:
             scraper_state["is_running"] = True
             scraper_state["start_time"] = datetime.now()
             scraper_state["status"] = "starting"
         
-        logger.info(f"Starting cricket odds scraper with {interval} second interval")
+        logger.info(f"Starting cricket odds scraper with {interval} second interval - fetch-quit-wait loop mode")
         
         # Track successful extraction stats
         last_successful_extraction = None
-        # Removed page_refresh_interval variable as we're no longer using it
+        iteration_counter = 0
         
-        if not self.setup_driver():
-            logger.error("Failed to set up WebDriver. Exiting.")
-            with scraper_state["lock"]:
-                scraper_state["is_running"] = False
-                scraper_state["status"] = "failed"
-            return
+        # Update status to running
+        with scraper_state["lock"]:
+            scraper_state["status"] = "running"
         
-        try:
-            # Navigate to the site initially
-            if not self.navigate_to_site():
-                logger.error("Failed to navigate to the website. Exiting.")
-                with scraper_state["lock"]:
-                    scraper_state["is_running"] = False
-                    scraper_state["status"] = "failed"
-                return
-            
-            # Update status to running
-            with scraper_state["lock"]:
-                scraper_state["status"] = "running"
-            
-            # Create a counter for tracking iterations
-            iteration_counter = 0
-            
-            while scraper_state["is_running"]:
-                try:
-                    start_time = time.time()
-                    iteration_counter += 1
-                    
-                    # Log heartbeat every 10 iterations
-                    if iteration_counter % 10 == 0:
-                        logger.info(f"Scraper heartbeat: iteration {iteration_counter}")
-                    
-                    # Removed the automatic page refresh code block
-                    # We'll no longer force refreshes based on time intervals
-                    
-                    # Extract and update data
-                    matches = self.extract_cricket_odds()
-                    
-                    if matches:
-                        self.update_global_state(matches)
-                        last_successful_extraction = time.time()
-                    
-                    # Update error count
-                    with scraper_state["lock"]:
-                        scraper_state["error_count"] = self.error_count
-                    
-                    # Always update last_updated timestamp to show we're alive
-                    with scraper_state["lock"]:
-                        scraper_state["last_updated"] = datetime.now().isoformat()
-                    
-                    # Ensure we keep to the 1-second interval exactly
-                    elapsed = time.time() - start_time
-                    sleep_time = max(0, interval - elapsed)
-                    
-                    if iteration_counter % 30 == 0:
-                        logger.info(f"Iteration time: {elapsed:.3f}s, sleeping for {sleep_time:.3f}s")
-                        
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
-                        
-                except Exception as e:
-                    logger.error(f"Error in scraper loop: {str(e)}")
-                    time.sleep(1)  # Short recovery sleep
-                    
-                    # Check if we need to reset the driver
-                    if self.error_count > self.max_continuous_errors:
-                        logger.warning("Too many errors, resetting driver")
-                        if not self.setup_driver() or not self.navigate_to_site():
-                            logger.error("Driver reset failed")
-                        else:
-                            self.error_count = 0
-                
-        except Exception as e:
-            logger.error(f"Unexpected error in scraper: {str(e)}")
-        finally:
-            # Clean up
+        while scraper_state["is_running"]:
             try:
-                if self.driver:
-                    self.driver.quit()
-            except:
-                pass
-            
-            with scraper_state["lock"]:
-                scraper_state["is_running"] = False
-                scraper_state["status"] = "stopped"
+                start_time = time.time()
+                iteration_counter += 1
+                
+                # Log heartbeat every 10 iterations
+                if iteration_counter % 10 == 0:
+                    logger.info(f"Scraper heartbeat: iteration {iteration_counter}")
+                
+                # Step 1: Set up a fresh driver for this iteration
+                if not self.setup_driver():
+                    logger.error("Failed to set up WebDriver. Skipping this iteration.")
+                    self.error_count += 1
+                    time.sleep(1)
+                    continue
+                
+                # Step 2: Navigate to the site
+                if not self.navigate_to_site():
+                    logger.error("Failed to navigate to the website. Skipping this iteration.")
+                    self.error_count += 1
+                    try:
+                        if self.driver:
+                            self.driver.quit()
+                    except Exception as e:
+                        logger.error(f"Error closing driver: {str(e)}")
+                    time.sleep(1)
+                    continue
+                
+                # Step 3: Extract and update data
+                matches = self.extract_cricket_odds()
+                
+                # Step 4: Close the browser immediately after extraction
+                try:
+                    if self.driver:
+                        self.driver.quit()
+                        self.driver = None
+                except Exception as e:
+                    logger.error(f"Error closing driver: {str(e)}")
+                
+                # Step 5: Process the data (after browser is closed to save resources)
+                if matches:
+                    self.update_global_state(matches)
+                    last_successful_extraction = time.time()
+                    self.error_count = 0
+                else:
+                    self.error_count += 1
+                    logger.warning(f"No matches found in iteration {iteration_counter}")
+                
+                # Update error count in global state
+                with scraper_state["lock"]:
+                    scraper_state["error_count"] = self.error_count
+                    scraper_state["last_updated"] = datetime.now().isoformat()
+                
+                # Step 6: Wait for the next iteration, ensuring proper timing
+                elapsed = time.time() - start_time
+                sleep_time = max(0, interval - elapsed)
+                
+                if iteration_counter % 30 == 0:
+                    logger.info(f"Iteration time: {elapsed:.3f}s, sleeping for {sleep_time:.3f}s")
+                    
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                    
+            except Exception as e:
+                logger.error(f"Error in scraper loop: {str(e)}")
+                
+                # Always make sure to close the browser if an error occurs
+                try:
+                    if self.driver:
+                        self.driver.quit()
+                        self.driver = None
+                except Exception as e:
+                    logger.error(f"Error closing driver during error handling: {str(e)}")
+                
+                time.sleep(1)  # Short recovery sleep
+                
+                # Reset error counter if too many errors
+                if self.error_count > self.max_continuous_errors:
+                    logger.warning("Too many errors, resetting error counter")
+                    self.error_count = 0
+        
+        # Final cleanup
+        try:
+            if self.driver:
+                self.driver.quit()
+        except:
+            pass
+        
+        with scraper_state["lock"]:
+            scraper_state["is_running"] = False
+            scraper_state["status"] = "stopped"
 
 # Start the scraper in a background thread
 def start_scraper_thread():
@@ -603,7 +613,7 @@ async def root():
     # This is the fixed root endpoint that will handle GET /
     return {
         "name": "Cricket Odds API",
-        "version": "2.0.1",
+        "version": "2.0.2",
         "description": "API for real-time cricket odds from betbhai.io",
         "endpoints": [
             {"path": "/matches", "description": "Get all cricket matches"},

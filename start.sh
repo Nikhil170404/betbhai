@@ -1,56 +1,43 @@
 #!/bin/bash
-# Start script for Cricket Odds API on Render
-# This script installs Chrome, ChromeDriver, and starts the application
-
-# Exit immediately if a command exits with a non-zero status
-set -e
-
-echo "Starting setup process for Cricket Odds API..."
-
-# Install Chrome dependencies
-echo "Installing Chrome dependencies..."
+# Create required directories
+mkdir -p data
+mkdir -p match_logs
+mkdir -p debug_html
+# Set environment variable for Render detection
+export RENDER=true
+# Install Chrome directly in the start script to ensure it's available
+echo "Installing Chrome..."
 apt-get update
-apt-get install -y wget gnupg unzip curl xvfb
-
-# Install Chrome browser
-echo "Installing Google Chrome..."
+apt-get install -y wget gnupg
 wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add -
-echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list
 apt-get update
 apt-get install -y google-chrome-stable
-
-# Get Chrome version and corresponding ChromeDriver
+# Verify Chrome installation
+echo "Chrome version:"
+google-chrome --version
+# Manually download and set up ChromeDriver
 echo "Setting up ChromeDriver..."
 CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | cut -d. -f1)
-echo "Detected Chrome version: $CHROME_VERSION"
-
-# Find matching ChromeDriver version
 CHROMEDRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$CHROME_VERSION")
-echo "Using ChromeDriver version: $CHROMEDRIVER_VERSION"
-
-# Download and install ChromeDriver
-wget -q -O /tmp/chromedriver.zip "https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip"
-unzip -o /tmp/chromedriver.zip -d /usr/local/bin/
-chmod +x /usr/local/bin/chromedriver
-rm /tmp/chromedriver.zip
-
-# Check installation
+wget -q "https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip"
+unzip chromedriver_linux64.zip
+chmod +x chromedriver
+mv chromedriver /usr/local/bin/
 echo "ChromeDriver installed at: $(which chromedriver)"
 echo "ChromeDriver version: $(chromedriver --version)"
-
-# Create data directory
-mkdir -p data
-
-# Set up virtual environment if needed (commented out - uncomment if needed)
-# python -m venv venv
-# source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Get PORT from environment or default to 10000
-PORT="${PORT:-10000}"
+# Set environment variables for better performance
+export PYTHONUNBUFFERED=1
+export CHROME_BIN=/usr/bin/google-chrome
+export CHROME_PATH=/usr/bin/google-chrome
+export WEB_CONCURRENCY=1  # Ensure only one worker to avoid multiple scrapers
+# Increase system limits for Chrome
+echo "Increasing system limits for Chrome"
+ulimit -n 4096
+# Configure Chrome for better stability in containerized environments
+echo "Configuring Chrome for container environment"
+mkdir -p /tmp/chrome-user-data
+chmod 777 /tmp/chrome-user-data
+# Start the application with proper logging and extended timeouts
 echo "Starting application on port $PORT"
-
-# Run the FastAPI application with uvicorn
-exec python -m uvicorn app:app --host 0.0.0.0 --port $PORT
+exec uvicorn app:app --host 0.0.0.0 --port $PORT --timeout-keep-alive 300 

@@ -440,7 +440,7 @@ class CricketOddsScraper:
         
         # Track successful extraction stats
         last_successful_extraction = None
-        page_refresh_interval = 10  # Force full page refresh every 10 seconds
+        # Removed page_refresh_interval variable as we're no longer using it
         
         if not self.setup_driver():
             logger.error("Failed to set up WebDriver. Exiting.")
@@ -474,12 +474,9 @@ class CricketOddsScraper:
                     if iteration_counter % 10 == 0:
                         logger.info(f"Scraper heartbeat: iteration {iteration_counter}")
                     
-                    # Check if we need to do a full page refresh
-                    current_time = time.time()
-                    if last_successful_extraction and (current_time - last_successful_extraction) > page_refresh_interval:
-                        logger.info(f"Forcing page refresh after {page_refresh_interval} seconds without updates")
-                        self.navigate_to_site()
-                        
+                    # Removed the automatic page refresh code block
+                    # We'll no longer force refreshes based on time intervals
+                    
                     # Extract and update data
                     matches = self.extract_cricket_odds()
                     
@@ -516,7 +513,7 @@ class CricketOddsScraper:
                             logger.error("Driver reset failed")
                         else:
                             self.error_count = 0
-                    
+                
         except Exception as e:
             logger.error(f"Unexpected error in scraper: {str(e)}")
         finally:

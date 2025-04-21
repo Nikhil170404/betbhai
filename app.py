@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cricket Odds API for BetBhai.io - Fixed for Render
+Cricket Odds API for BetBhai.io - Fixed for Render with 1-second updates
 """
 
 import os
@@ -9,6 +9,7 @@ import time
 import json
 import logging
 import threading
+import asyncio
 import uvicorn
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -180,17 +181,19 @@ class CricketOddsScraper:
         return match_key
     
     def extract_cricket_odds(self):
-        """Extract cricket odds data from the loaded page - fixed invalid selector"""
+        """Extract cricket odds data from the loaded page with improved data refresh"""
         matches = []
         
         try:
-            # Find cricket sections - FIXED: don't use :contains() selector which is invalid
+            # Always force DOM refresh to catch all updates
+            self.driver.execute_script("return document.body.innerHTML;")
+                
+            # Find cricket sections
             cricket_sections = self.driver.find_elements(By.CSS_SELECTOR, 'ion-list.inplay-item-list')
             
             for section in cricket_sections:
                 try:
                     # Check if this is the cricket section by looking for the text or icon
-                    # FIXED: Use a more compatible approach to identify cricket section
                     header_content = section.find_element(By.CSS_SELECTOR, '.inplay-item-list__header-content')
                     header_text = header_content.text.lower()
                     
@@ -209,10 +212,16 @@ class CricketOddsScraper:
                     
                     for item in match_items:
                         try:
-                            # Extract team names
-                            player_elems = item.find_elements(By.CSS_SELECTOR, '.inplay-item__player span')
-                            team1 = player_elems[0].text if len(player_elems) >= 1 else ""
-                            team2 = player_elems[1].text if len(player_elems) > 1 else ""
+                            # Extract team names with better error handling
+                            try:
+                                player_elems = item.find_elements(By.CSS_SELECTOR, '.inplay-item__player span')
+                                team1 = player_elems[0].text if len(player_elems) >= 1 else ""
+                                team2 = player_elems[1].text if len(player_elems) > 1 else ""
+                            except StaleElementReferenceException:
+                                # If we hit stale element, force a refresh and retry immediately
+                                logger.debug("Stale element encountered, refreshing reference")
+                                self.driver.execute_script("return document.body.innerHTML;")
+                                continue
 
                             # Create a stable ID
                             stable_id = self._create_stable_id(team1, team2)
@@ -249,28 +258,34 @@ class CricketOddsScraper:
                             # Back odds
                             back_buttons = item.find_elements(By.CSS_SELECTOR, '.odd-button.back-color')
                             for i, button in enumerate(back_buttons):
-                                price_elem = button.find_elements(By.CSS_SELECTOR, '.odd-button__price')
-                                volume_elem = button.find_elements(By.CSS_SELECTOR, '.odd-button__volume')
-                                
-                                if price_elem and price_elem[0].text and price_elem[0].text != '-':
-                                    odds['back'].append({
-                                        'position': i,
-                                        'price': price_elem[0].text,
-                                        'volume': volume_elem[0].text if volume_elem else None
-                                    })
+                                try:
+                                    price_elem = button.find_elements(By.CSS_SELECTOR, '.odd-button__price')
+                                    volume_elem = button.find_elements(By.CSS_SELECTOR, '.odd-button__volume')
+                                    
+                                    if price_elem and price_elem[0].text and price_elem[0].text != '-':
+                                        odds['back'].append({
+                                            'position': i,
+                                            'price': price_elem[0].text,
+                                            'volume': volume_elem[0].text if volume_elem else None
+                                        })
+                                except StaleElementReferenceException:
+                                    continue
                             
                             # Lay odds
                             lay_buttons = item.find_elements(By.CSS_SELECTOR, '.odd-button.lay-color')
                             for i, button in enumerate(lay_buttons):
-                                price_elem = button.find_elements(By.CSS_SELECTOR, '.odd-button__price')
-                                volume_elem = button.find_elements(By.CSS_SELECTOR, '.odd-button__volume')
-                                
-                                if price_elem and price_elem[0].text and price_elem[0].text != '-':
-                                    odds['lay'].append({
-                                        'position': i,
-                                        'price': price_elem[0].text,
-                                        'volume': volume_elem[0].text if volume_elem else None
-                                    })
+                                try:
+                                    price_elem = button.find_elements(By.CSS_SELECTOR, '.odd-button__price')
+                                    volume_elem = button.find_elements(By.CSS_SELECTOR, '.odd-button__volume')
+                                    
+                                    if price_elem and price_elem[0].text and price_elem[0].text != '-':
+                                        odds['lay'].append({
+                                            'position': i,
+                                            'price': price_elem[0].text,
+                                            'volume': volume_elem[0].text if volume_elem else None
+                                        })
+                                except StaleElementReferenceException:
+                                    continue
                             
                             match_data['odds'] = odds
                             matches.append(match_data)
@@ -285,7 +300,9 @@ class CricketOddsScraper:
                 logger.info(f"Extracted {len(matches)} cricket matches")
                 self.error_count = 0
             else:
-                logger.warning("No cricket matches found")
+                # If no matches found, force a page refresh to recover
+                logger.warning("No cricket matches found, refreshing page")
+                self.navigate_to_site()
                 self.error_count += 1
             
             return matches
@@ -295,8 +312,50 @@ class CricketOddsScraper:
             self.error_count += 1
             return []
     
+    def _has_odds_changed(self, old_match, new_match):
+        """Compare odds between old and new match data to detect changes"""
+        # Check if score changed
+        if old_match.get("score") != new_match.get("score"):
+            return True
+            
+        # Check if in_play status changed
+        if old_match.get("in_play") != new_match.get("in_play"):
+            return True
+        
+        # Check for odds changes
+        old_odds = old_match.get("odds", {})
+        new_odds = new_match.get("odds", {})
+        
+        # Compare back odds
+        old_back = old_odds.get("back", [])
+        new_back = new_odds.get("back", [])
+        
+        if len(old_back) != len(new_back):
+            return True
+            
+        for i, (old_odd, new_odd) in enumerate(zip(old_back, new_back)):
+            if old_odd.get("price") != new_odd.get("price"):
+                return True
+            if old_odd.get("volume") != new_odd.get("volume"):
+                return True
+        
+        # Compare lay odds
+        old_lay = old_odds.get("lay", [])
+        new_lay = new_odds.get("lay", [])
+        
+        if len(old_lay) != len(new_lay):
+            return True
+            
+        for i, (old_odd, new_odd) in enumerate(zip(old_lay, new_lay)):
+            if old_odd.get("price") != new_odd.get("price"):
+                return True
+            if old_odd.get("volume") != new_odd.get("volume"):
+                return True
+        
+        return False
+    
     def update_global_state(self, new_matches):
-        """Update the global state with new matches data"""
+        """Update the global state with new matches data with improved change tracking"""
         try:
             changes_made = 0
             current_time = datetime.now().isoformat()
@@ -309,11 +368,25 @@ class CricketOddsScraper:
                     'matches': new_matches
                 }
                 
-                # Simple change detection
-                old_count = len(scraper_state["data"].get("matches", []))
-                new_count = len(new_matches)
-                if old_count != new_count:
-                    changes_made = abs(old_count - new_count)
+                # More sophisticated change detection
+                old_matches = scraper_state["data"].get("matches", [])
+                old_match_ids = {m.get("id"): m for m in old_matches}
+                new_match_ids = {m.get("id"): m for m in new_matches}
+                
+                # Check for added or removed matches
+                added_matches = set(new_match_ids.keys()) - set(old_match_ids.keys())
+                removed_matches = set(old_match_ids.keys()) - set(new_match_ids.keys())
+                initial_changes = len(added_matches) + len(removed_matches)
+                changes_made += initial_changes
+                
+                # Check for updated odds in existing matches
+                for match_id in set(old_match_ids.keys()) & set(new_match_ids.keys()):
+                    old_match = old_match_ids[match_id]
+                    new_match = new_match_ids[match_id]
+                    
+                    # Detailed check for specific changes
+                    if self._has_odds_changed(old_match, new_match):
+                        changes_made += 1
                 
                 # Update global state
                 scraper_state["data"] = output_data
@@ -321,14 +394,22 @@ class CricketOddsScraper:
                 scraper_state["status"] = "running"
                 scraper_state["changes_since_last_update"] = changes_made
                 
-                # Save data to file periodically (every 30 seconds)
+                # Save data to file with more frequent updates
                 last_saved = getattr(self, 'last_saved', None)
                 now = datetime.now()
-                if last_saved is None or (now - last_saved).total_seconds() > 30:
+                
+                # Save data if changes were made or every 5 seconds (instead of 30)
+                if (changes_made > 0 or 
+                    last_saved is None or 
+                    (now - last_saved).total_seconds() > 5):
                     self._save_data_files(output_data)
                     self.last_saved = now
+                    logger.info(f"Data saved to disk{' with changes' if changes_made > 0 else ''}")
                 
-                logger.info(f"Data updated with {len(new_matches)} matches")
+                # Always log when we extract data, regardless of changes
+                timestamp = now.strftime("%H:%M:%S")
+                logger.info(f"Data updated at {timestamp} with {len(new_matches)} matches" + 
+                           (f" ({changes_made} changes)" if changes_made > 0 else ""))
                 return True
         except Exception as e:
             logger.error(f"Error updating global state: {str(e)}")
@@ -349,13 +430,17 @@ class CricketOddsScraper:
             return False
     
     def run(self, interval=1):
-        """Run the scraper every 'interval' seconds"""
+        """Run the scraper every 'interval' seconds with improved reliability"""
         with scraper_state["lock"]:
             scraper_state["is_running"] = True
             scraper_state["start_time"] = datetime.now()
             scraper_state["status"] = "starting"
         
         logger.info(f"Starting cricket odds scraper with {interval} second interval")
+        
+        # Track successful extraction stats
+        last_successful_extraction = None
+        page_refresh_interval = 10  # Force full page refresh every 10 seconds
         
         if not self.setup_driver():
             logger.error("Failed to set up WebDriver. Exiting.")
@@ -377,37 +462,52 @@ class CricketOddsScraper:
             with scraper_state["lock"]:
                 scraper_state["status"] = "running"
             
-            refresh_count = 0
+            # Create a counter for tracking iterations
+            iteration_counter = 0
             
             while scraper_state["is_running"]:
                 try:
                     start_time = time.time()
+                    iteration_counter += 1
                     
+                    # Log heartbeat every 10 iterations
+                    if iteration_counter % 10 == 0:
+                        logger.info(f"Scraper heartbeat: iteration {iteration_counter}")
+                    
+                    # Check if we need to do a full page refresh
+                    current_time = time.time()
+                    if last_successful_extraction and (current_time - last_successful_extraction) > page_refresh_interval:
+                        logger.info(f"Forcing page refresh after {page_refresh_interval} seconds without updates")
+                        self.navigate_to_site()
+                        
                     # Extract and update data
                     matches = self.extract_cricket_odds()
+                    
                     if matches:
                         self.update_global_state(matches)
-                    
-                    # Refresh page every 10 iterations
-                    refresh_count += 1
-                    if refresh_count >= 10:
-                        logger.info("Refreshing page")
-                        self.navigate_to_site()
-                        refresh_count = 0
+                        last_successful_extraction = time.time()
                     
                     # Update error count
                     with scraper_state["lock"]:
                         scraper_state["error_count"] = self.error_count
                     
-                    # Sleep to maintain interval
+                    # Always update last_updated timestamp to show we're alive
+                    with scraper_state["lock"]:
+                        scraper_state["last_updated"] = datetime.now().isoformat()
+                    
+                    # Ensure we keep to the 1-second interval exactly
                     elapsed = time.time() - start_time
                     sleep_time = max(0, interval - elapsed)
+                    
+                    if iteration_counter % 30 == 0:
+                        logger.info(f"Iteration time: {elapsed:.3f}s, sleeping for {sleep_time:.3f}s")
+                        
                     if sleep_time > 0:
                         time.sleep(sleep_time)
                         
                 except Exception as e:
                     logger.error(f"Error in scraper loop: {str(e)}")
-                    time.sleep(5)  # Wait before retrying
+                    time.sleep(1)  # Short recovery sleep
                     
                     # Check if we need to reset the driver
                     if self.error_count > self.max_continuous_errors:
@@ -416,7 +516,7 @@ class CricketOddsScraper:
                             logger.error("Driver reset failed")
                         else:
                             self.error_count = 0
-                
+                    
         except Exception as e:
             logger.error(f"Unexpected error in scraper: {str(e)}")
         finally:
@@ -437,12 +537,68 @@ def start_scraper_thread():
         scraper = CricketOddsScraper()
         thread = threading.Thread(target=scraper.run, args=(1,), daemon=True)
         thread.start()
-        logger.info("Scraper thread started")
+        logger.info("Scraper thread started with 1-second update interval")
         return True
     else:
         return False
 
-# API Endpoints - FIXED to ensure routing works correctly
+# On startup
+@app.on_event("startup")
+async def startup_event():
+    """Start the application and initialize the scraper"""
+    # Initialize scraper state
+    scraper_state["start_time"] = datetime.now()
+    
+    # Start the scraper automatically
+    if start_scraper_thread():
+        logger.info("API started and scraper initialized successfully")
+    else:
+        logger.warning("API started but scraper was already running")
+    
+    # Schedule a maintenance task to check scraper health
+    background_tasks = BackgroundTasks()
+    background_tasks.add_task(monitor_scraper_health)
+
+async def monitor_scraper_health():
+    """Monitor scraper health and restart if needed"""
+    while True:
+        try:
+            # Check if updates are happening
+            with scraper_state["lock"]:
+                last_updated = scraper_state.get("last_updated")
+                is_running = scraper_state.get("is_running", False)
+            
+            if last_updated:
+                last_updated_time = datetime.fromisoformat(last_updated)
+                current_time = datetime.now()
+                
+                # If no updates for more than 30 seconds, restart scraper
+                if (current_time - last_updated_time).total_seconds() > 30:
+                    logger.warning("No updates for 30+ seconds. Restarting scraper.")
+                    
+                    # Stop the scraper if it's running
+                    with scraper_state["lock"]:
+                        scraper_state["is_running"] = False
+                    
+                    # Wait a moment for cleanup
+                    await asyncio.sleep(5)
+                    
+                    # Start a new scraper
+                    start_scraper_thread()
+            
+            # Check if scraper is marked as running but not actually updating
+            elif not is_running:
+                logger.warning("Scraper not running. Starting it.")
+                start_scraper_thread()
+                
+            # Check again after 15 seconds
+            await asyncio.sleep(15)
+            
+        except Exception as e:
+            logger.error(f"Error in scraper health monitor: {e}")
+            await asyncio.sleep(10)
+
+# API Endpoints
 
 @app.get("/", tags=["Root"], include_in_schema=True)
 async def root():
@@ -468,6 +624,10 @@ async def get_matches(
     """Get all cricket matches with optional filtering"""
     with scraper_state["lock"]:
         matches = scraper_state["data"].get("matches", [])
+        last_updated = scraper_state["last_updated"]
+    
+    # Log every API request with timestamp for debugging
+    logger.debug(f"GET /matches request at {datetime.now().strftime('%H:%M:%S')} - last data update: {last_updated}")
     
     # Apply filters if provided
     if team:
@@ -559,18 +719,6 @@ async def stop_scraper():
         scraper_state["status"] = "stopping"
     
     return {"message": "Scraper shutdown initiated"}
-
-# On startup
-@app.on_event("startup")
-async def startup_event():
-    """Start the application and initialize the scraper"""
-    # Initialize scraper state
-    scraper_state["start_time"] = datetime.now()
-    
-    # Start the scraper automatically
-    start_scraper_thread()
-    
-    logger.info("API started and scraper initialized")
 
 # On shutdown
 @app.on_event("shutdown")
